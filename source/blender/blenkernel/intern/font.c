@@ -161,6 +161,9 @@ static VFontData *vfont_get_data(Main *bmain, VFont *vfont)
 
 		if (BKE_vfont_is_builtin(vfont)) {
 			pf = get_builtin_packedfile();
+			if (vfont->temp_pf == NULL) {
+				vfont->temp_pf = dupPackedFile(pf);
+			}
 		}
 		else {
 			if (vfont->packedfile) {
@@ -235,6 +238,7 @@ VFont *BKE_vfont_load(Main *bmain, const char *filepath)
 		BLI_strncpy(filename, filepath, sizeof(filename));
 		
 		pf = get_builtin_packedfile();
+		temp_pf = dupPackedFile(pf);
 		is_builtin = true;
 	}
 	else {
@@ -260,14 +264,12 @@ VFont *BKE_vfont_load(Main *bmain, const char *filepath)
 			BLI_strncpy(vfont->name, filepath, sizeof(vfont->name));
 
 			/* if autopack is on store the packedfile in de font structure */
-			if (!is_builtin && (G.fileflags & G_AUTOPACK)) {
+			if (G.fileflags & G_AUTOPACK) {
 				vfont->packedfile = pf;
 			}
 
 			/* Do not add FO_BUILTIN_NAME to temporary listbase */
-			if (!STREQ(filename, FO_BUILTIN_NAME)) {
-				vfont->temp_pf = temp_pf;
-			}
+			vfont->temp_pf = temp_pf;
 		}
 
 		/* Free the packed file */
@@ -402,14 +404,13 @@ static void build_underline(Curve *cu, ListBase *nubase, const rctf *rect,
 	mul_v2_fl(bp[3].vec, cu->fsize);
 }
 
-static void buildchar(Main *bmain, Curve *cu, ListBase *nubase, unsigned int character, CharInfo *info,
-                      float ofsx, float ofsy, float rot, int charidx)
+static void buildchar(Main *bmain, Curve *cu, ListBase *nubase, CharInfo *info,
+					  float ofsx, float ofsy, float rot, int charidx, VChar *che)
 {
 	BezTriple *bezt1, *bezt2;
 	Nurb *nu1 = NULL, *nu2 = NULL;
 	float *fp, fsize, shear, x, si, co;
 	VFontData *vfd = NULL;
-	VChar *che = NULL;
 	int i;
 
 	vfd = vfont_get_data(bmain, which_vfont(cu, info));
@@ -431,8 +432,6 @@ static void buildchar(Main *bmain, Curve *cu, ListBase *nubase, unsigned int cha
 	shear = cu->shear;
 	si = sinf(rot);
 	co = cosf(rot);
-
-	che = find_vfont_char(vfd, character);
 	
 	/* Select the glyph data */
 	if (che)
@@ -582,17 +581,13 @@ void BKE_vfont_select_clamp(Object *ob)
 	CLAMP_MAX(ef->selend,   ef->len);
 }
 
-static float char_width(Curve *cu, VChar *che, CharInfo *info)
+static float char_width(Curve *cu, CharInfo *info, float x_advance)
 {
-	/* The character wasn't found, propably ascii = 0, then the width shall be 0 as well */
-	if (che == NULL) {
-		return 0.0f;
-	}
-	else if (info->flag & CU_CHINFO_SMALLCAPS_CHECK) {
-		return che->width * cu->smallcaps_scale;
+	if (info->flag & CU_CHINFO_SMALLCAPS_CHECK) {
+		return x_advance * cu->smallcaps_scale;
 	}
 	else {
-		return che->width;
+		return x_advance;
 	}
 }
 
@@ -615,7 +610,7 @@ struct TempLineInfo {
 };
 
 bool BKE_vfont_to_curve_ex(Main *bmain, Object *ob, int mode, ListBase *r_nubase,
-                           const wchar_t **r_text, int *r_text_len, bool *r_text_free,
+						   const wchar_t **r_text, int *r_text_len, bool *r_text_free,
                            struct CharTrans **r_chartransdata)
 {
 	Curve *cu = ob->data;
@@ -627,16 +622,18 @@ bool BKE_vfont_to_curve_ex(Main *bmain, Object *ob, int mode, ListBase *r_nubase
 	TextBox tb_scale;
 	bool use_textbox;
 	VChar *che;
+	VGlyph *glyph_info;
 	struct CharTrans *chartransdata = NULL, *ct;
 	struct TempLineInfo *lineinfo;
 	float *f, xof, yof, xtrax, linedist;
 	float twidth, maxlen = 0;
-	int i, slen, j;
+	int i, slen, j, glen;
 	int curbox;
 	int selstart, selend;
 	int cnr = 0, lnr = 0, wsnr = 0;
-	const wchar_t *mem;
-	wchar_t ascii;
+	const unsigned int *mem;
+	unsigned int *text;
+	unsigned int ch;
 	bool ok = false;
 	const float xof_scale = cu->xof / cu->fsize;
 	const float yof_scale = cu->yof / cu->fsize;
@@ -666,11 +663,11 @@ bool BKE_vfont_to_curve_ex(Main *bmain, Object *ob, int mode, ListBase *r_nubase
 		custrinfo = ef->textbufinfo;
 	}
 	else {
-		wchar_t *mem_tmp;
+		unsigned int *mem_tmp;
 		slen = cu->len_wchar;
 
 		/* Create unicode string */
-		mem_tmp = MEM_mallocN(((slen + 1) * sizeof(wchar_t)), "convertedmem");
+		mem_tmp = MEM_mallocN(((slen + 1) * sizeof(unsigned int)), "convertedmem");
 
 		BLI_strncpy_wchar_from_utf8(mem_tmp, cu->str, slen + 1);
 
@@ -681,6 +678,39 @@ bool BKE_vfont_to_curve_ex(Main *bmain, Object *ob, int mode, ListBase *r_nubase
 
 		mem = mem_tmp;
 	}
+	/* handeling SMALLCAPS flag */
+	for (i = 0; i < slen; i++) {
+		custrinfo[i].flag &= ~(CU_CHINFO_WRAP | CU_CHINFO_SMALLCAPS_CHECK);
+	}
+	text =  MEM_mallocN(((slen) * sizeof(unsigned int)), "text for shaping");
+	for (i = 0; i < slen; i++) {
+		text[i] = mem[i];
+		if ( custrinfo[i].flag & CU_CHINFO_SMALLCAPS) {
+			text[i] = towupper(text[i]);
+			if (mem[i] != text[i]) {
+				custrinfo[i].flag |= CU_CHINFO_SMALLCAPS_CHECK;
+			}
+		}
+	}
+
+	/* handeling BOLD and ITALIC flags */
+	struct VFont **vfonts =  MEM_mallocN(((slen) * sizeof(struct VFont)), "array of fonts");
+	for (i = 0; i < slen; i++) {
+		vfonts[i] = which_vfont(cu, &custrinfo[i]);
+		vfonts[i]->data = vfont_get_data(bmain, vfonts[i]);
+	}
+
+	/* call shaping */
+	glyph_info = BLI_shape_text(vfonts, text, slen);
+
+	/* VGlyph was not found */
+	if (!glyph_info) return ok;
+
+	/* slen now equals total glyphs length*/
+	glen = glyph_info[0].glen;
+
+	MEM_freeN((void *)text);
+	MEM_freeN((void *)vfonts);
 
 	if (cu->tb == NULL)
 		cu->tb = MEM_callocN(MAXTEXTBOX * sizeof(TextBox), "TextBox compat");
@@ -696,13 +726,12 @@ bool BKE_vfont_to_curve_ex(Main *bmain, Object *ob, int mode, ListBase *r_nubase
 
 		selboxes = ef->selboxes;
 	}
-
 	/* calc offset and rotation of each char */
-	ct = chartransdata = MEM_callocN((slen + 1) * sizeof(struct CharTrans), "buildtext");
+	ct = chartransdata = MEM_callocN((glen + 1) * sizeof(struct CharTrans), "buildtext");
 
 	/* We assume the worst case: 1 character per line (is freed at end anyway) */
-	lineinfo = MEM_mallocN(sizeof(*lineinfo) * (slen * 2 + 1), "lineinfo");
-	
+	lineinfo = MEM_mallocN(sizeof(*lineinfo) * (glen * 2 + 1), "lineinfo");
+
 	linedist = cu->linedist;
 	
 	curbox = 0;
@@ -717,29 +746,21 @@ bool BKE_vfont_to_curve_ex(Main *bmain, Object *ob, int mode, ListBase *r_nubase
 
 	oldvfont = NULL;
 
-	for (i = 0; i < slen; i++) {
-		custrinfo[i].flag &= ~(CU_CHINFO_WRAP | CU_CHINFO_SMALLCAPS_CHECK);
-	}
-
-	for (i = 0; i <= slen; i++) {
+	for (i = 0; i <= glen; i++) {
 makebreak:
 		/* Characters in the list */
-		info = &custrinfo[i];
-		ascii = mem[i];
-		if (info->flag & CU_CHINFO_SMALLCAPS) {
-			ascii = towupper(ascii);
-			if (mem[i] != ascii) {
-				info->flag |= CU_CHINFO_SMALLCAPS_CHECK;
-			}
+		info = &custrinfo[glyph_info[i].cluster];
+
+		if (i >= glen)
+			ch = NULL;
+		else {
+			ch = mem[glyph_info[i].cluster];
+			vfont = glyph_info[i].vfont;
 		}
 
-		vfont = which_vfont(cu, info);
-
-		if (vfont == NULL) break;
-
-		if (vfont != oldvfont) {
+		if (vfont != oldvfont && (!ELEM(ch, '\n', '\0'))) {
 			vfd = vfont_get_data(bmain, vfont);
-			oldvfont = vfont;
+			oldvfont = glyph_info[i].vfont;
 		}
 
 		/* VFont Data for VFont couldn't be found */
@@ -750,9 +771,9 @@ makebreak:
 			goto finally;
 		}
 
-		if (!ELEM(ascii, '\n', '\0')) {
+		if (!ELEM(ch, '\n', '\0')) {
 			BLI_rw_mutex_lock(&vfont_rwlock, THREAD_LOCK_READ);
-			che = find_vfont_char(vfd, ascii);
+			che = find_vfont_char(vfd, glyph_info[i].index);
 			BLI_rw_mutex_unlock(&vfont_rwlock);
 
 			/*
@@ -768,8 +789,8 @@ makebreak:
 				 * Such a check should not be a bottleneck since it wouldn't
 				 * happen often once all the chars are load.
 				 */
-				if ((che = find_vfont_char(vfd, ascii)) == NULL) {
-					che = BLI_vfontchar_from_freetypefont(vfont, ascii);
+				if ((che = find_vfont_char(vfd, glyph_info[i].index)) == NULL) {
+					che = BLI_vfontchar_from_freetypefont(vfont, glyph_info[i].index);
 				}
 				BLI_rw_mutex_unlock(&vfont_rwlock);
 			}
@@ -778,7 +799,10 @@ makebreak:
 			che = NULL;
 		}
 
-		twidth = char_width(cu, che, info);
+		if (che == NULL)
+			twidth = 0.0f;
+		else
+			twidth = char_width(cu, info, glyph_info[i].x_advance * vfd->scale);
 
 		/* Calculate positions */
 		if ((tb_scale.w != 0.0f) &&
@@ -786,12 +810,12 @@ makebreak:
 		    (((xof - tb_scale.x) + twidth) > xof_scale + tb_scale.w))
 		{
 			//		fprintf(stderr, "linewidth exceeded: %c%c%c...\n", mem[i], mem[i+1], mem[i+2]);
-			for (j = i; j && (mem[j] != '\n') && (chartransdata[j].dobreak == 0); j--) {
-				if (mem[j] == ' ' || mem[j] == '-') {
+			for (j = i; j && (mem[glyph_info[j].cluster] != '\n') && (chartransdata[j].dobreak == 0); j--) {
+				if (mem[glyph_info[j].cluster] == ' ' || mem[glyph_info[j].cluster] == '-') {
 					ct -= (i - (j - 1));
 					cnr -= (i - (j - 1));
-					if (mem[j] == ' ') wsnr--;
-					if (mem[j] == '-') wsnr++;
+					if (mem[glyph_info[j].cluster] == ' ') wsnr--;
+					if (mem[glyph_info[j].cluster] == '-') wsnr++;
 					i = j - 1;
 					xof = ct->xof;
 					ct[1].dobreak = 1;
@@ -811,7 +835,7 @@ makebreak:
 			}
 		}
 
-		if (ascii == '\n' || ascii == 0 || ct->dobreak) {
+		if (ch == '\n' || ch == 0 || ct->dobreak) {
 			ct->xof = xof;
 			ct->yof = yof;
 			ct->linenr = lnr;
@@ -851,7 +875,7 @@ makebreak:
 			cnr = 0;
 			wsnr = 0;
 		}
-		else if (ascii == 9) {    /* TAB */
+		else if (ch == 9) {    /* TAB */
 			float tabfac;
 			
 			ct->xof = xof;
@@ -879,7 +903,7 @@ makebreak:
 				sb->w = xof * cu->fsize;
 			}
 	
-			if (ascii == 32) {
+			if (ch == 32) {
 				wsfac = cu->wordspace; 
 				wsnr++;
 			}
@@ -888,7 +912,7 @@ makebreak:
 			}
 			
 			/* Set the width of the character */
-			twidth = char_width(cu, che, info);
+			twidth = char_width(cu, info, glyph_info[i].x_advance * vfd->scale);
 
 			xof += (twidth * wsfac * (1.0f + (info->kern / 40.0f)) ) + xtrax;
 			
@@ -900,10 +924,14 @@ makebreak:
 	}
 	
 	cu->lines = 1;
-	for (i = 0; i <= slen; i++) {
-		ascii = mem[i];
+	for (i = 0; i <= glen; i++) {
+		if (i >= glen)
+			ch = NULL;
+		else
+			ch = mem[glyph_info[i].cluster];
+
 		ct = &chartransdata[i];
-		if (ascii == '\n' || ct->dobreak) cu->lines++;
+		if (ch == '\n' || ct->dobreak) cu->lines++;
 	}
 
 	/* linedata is now: width of line */
@@ -918,7 +946,7 @@ makebreak:
 				li->x_min = (li->x_max - li->x_min) + xof_scale;
 			}
 
-			for (i = 0; i <= slen; i++) {
+			for (i = 0; i <= glen; i++) {
 				ct->xof += lineinfo[ct->linenr].x_min;
 				ct++;
 			}
@@ -930,7 +958,7 @@ makebreak:
 				li->x_min = ((li->x_max - li->x_min) + xof_scale) / 2.0f;
 			}
 
-			for (i = 0; i <= slen; i++) {
+			for (i = 0; i <= glen; i++) {
 				ct->xof += lineinfo[ct->linenr].x_min;
 				ct++;
 			}
@@ -945,8 +973,8 @@ makebreak:
 					li->x_min /= (float)(li->char_nr - 1);
 				}
 			}
-			for (i = 0; i <= slen; i++) {
-				for (j = i; (!ELEM(mem[j], '\0', '\n')) && (chartransdata[j].dobreak == 0) && (j < slen); j++) {
+			for (i = 0; i <= glen; i++) {
+				for (j = i; (!ELEM(mem[glyph_info[j].cluster], '\0', '\n')) && (chartransdata[j].dobreak == 0) && (j < glen); j++) {
 					/* do nothing */
 				}
 
@@ -958,18 +986,18 @@ makebreak:
 		}
 		else if ((cu->spacemode == CU_JUSTIFY) && use_textbox) {
 			float curofs = 0.0f;
-			for (i = 0; i <= slen; i++) {
+			for (i = 0; i <= glen; i++) {
 				for (j = i;
-				     (mem[j]) && (mem[j] != '\n') && (chartransdata[j].dobreak == 0) && (j < slen);
+					 (mem[glyph_info[j].cluster]) && (mem[glyph_info[j].cluster] != '\n') && (chartransdata[j].dobreak == 0) && (j < glen);
 				     j++)
 				{
 					/* pass */
 				}
 
-				if ((mem[j] != '\n') &&
+				if ((mem[glyph_info[j].cluster] != '\n') &&
 				    ((chartransdata[j].dobreak != 0)))
 				{
-					if (mem[i] == ' ') {
+					if (mem[glyph_info[i].cluster] == ' ') {
 						struct TempLineInfo *li;
 
 						li = &lineinfo[ct->linenr];
@@ -977,7 +1005,7 @@ makebreak:
 					}
 					ct->xof += curofs;
 				}
-				if (mem[i] == '\n' || chartransdata[i].dobreak) curofs = 0;
+				if (mem[glyph_info[i].cluster] == '\n' || chartransdata[i].dobreak) curofs = 0;
 				ct++;
 			}
 		}
@@ -1004,7 +1032,7 @@ makebreak:
 			minx = miny = 1.0e20f;
 			maxx = maxy = -1.0e20f;
 			ct = chartransdata;
-			for (i = 0; i <= slen; i++, ct++) {
+			for (i = 0; i <= glen; i++, ct++) {
 				if (minx > ct->xof) minx = ct->xof;
 				if (maxx < ct->xof) maxx = ct->xof;
 				if (miny > ct->yof) miny = ct->yof;
@@ -1040,21 +1068,24 @@ makebreak:
 			timeofs += distfac * cu->xof;  /* not cyclic */
 			
 			ct = chartransdata;
-			for (i = 0; i <= slen; i++, ct++) {
+			for (i = 0; i <= glen; i++, ct++) {
 				float ctime, dtime, vec[4], tvec[4], rotvec[3];
 				float si, co;
+				vfd = vfont_get_data(bmain, glyph_info[i].vfont);
+				vfont = glyph_info[i].vfont;
 				
 				/* rotate around center character */
 				info = &custrinfo[i];
-				ascii = mem[i];
+				if (i >= glen)
+					ch = NULL;
+				else
+					ch = mem[glyph_info[i].cluster];
+
 				if (info->flag & CU_CHINFO_SMALLCAPS_CHECK) {
-					ascii = towupper(ascii);
+					ch = towupper(ch);
 				}
-
-				che = find_vfont_char(vfd, ascii);
-	
-				twidth = char_width(cu, che, info);
-
+				che = find_vfont_char(vfd, glyph_info[i].index);
+				twidth = char_width(cu, info, glyph_info[i].x_advance * vfd->scale);
 				dtime = distfac * 0.5f * twidth;
 
 				ctime = timeofs + distfac * (ct->xof - minx);
@@ -1117,7 +1148,7 @@ makebreak:
 			/* seek for char with lnr en cnr */
 			ef->pos = 0;
 			ct = chartransdata;
-			for (i = 0; i < slen; i++) {
+			for (i = 0; i < glen; i++) {
 				if (ct->linenr == lnr) {
 					if ((ct->charnr == cnr) || ((ct + 1)->charnr == 0)) {
 						break;
@@ -1134,9 +1165,15 @@ makebreak:
 	
 	/* cursor first */
 	if (ef) {
+		int pos;
 		float si, co;
 		
-		ct = &chartransdata[ef->pos];
+		if(ef->pos > glen)
+			pos = glen;
+		else
+			pos = ef->pos;
+
+		ct = &chartransdata[pos];
 		si = sinf(ct->rot);
 		co = cosf(ct->rot);
 
@@ -1167,8 +1204,15 @@ makebreak:
 		BKE_nurbList_free(r_nubase);
 		
 		ct = chartransdata;
-		for (i = 0; i < slen; i++) {
-			unsigned int cha = (unsigned int) mem[i];
+		for (i = 0; i < glen; i++) {
+			vfd = vfont_get_data(bmain, glyph_info[i].vfont);
+			vfont = glyph_info[i].vfont;
+			if (i >= glen)
+				ch = NULL;
+			else
+				ch = mem[glyph_info[i].cluster];
+
+			unsigned int cha = (unsigned int) ch;
 			info = &(custrinfo[i]);
 
 			if (info->flag & CU_CHINFO_SMALLCAPS_CHECK) {
@@ -1180,24 +1224,28 @@ makebreak:
 				info->mat_nr = 0;
 			}
 			/* We do not want to see any character for \n or \r */
-			if (cha != '\n')
-				buildchar(bmain, cu, r_nubase, cha, info, ct->xof, ct->yof, ct->rot, i);
-
-			if ((info->flag & CU_CHINFO_UNDERLINE) && (cha != '\n')) {
+			if (ch != '\n') {
+				const float scale = vfont->data->scale;
+				che = find_vfont_char(vfd, glyph_info[i].index);
+				buildchar(bmain, cu, r_nubase, info,
+						  ct->xof + glyph_info[i].x_offset * scale,
+						  ct->yof + glyph_info[i].y_offset * scale,
+						  ct->rot, i, che);
+			}
+			if ((info->flag & CU_CHINFO_UNDERLINE) && (ch != '\n')) {
 				float ulwidth, uloverlap = 0.0f;
 				rctf rect;
 
-				if ((i < (slen - 1)) && (mem[i + 1] != '\n') &&
-				    ((mem[i + 1] != ' ') || (custrinfo[i + 1].flag & CU_CHINFO_UNDERLINE)) &&
+				if ((i < (glen - 1)) && (mem[glyph_info[i].cluster + 1] != '\n') &&
+					((mem[glyph_info[i].cluster  + 1] != ' ') || (custrinfo[i + 1].flag & CU_CHINFO_UNDERLINE)) &&
 				    ((custrinfo[i + 1].flag & CU_CHINFO_WRAP) == 0))
 				{
 					uloverlap = xtrax + 0.1f;
 				}
 				/* Find the character, the characters has to be in the memory already
 				 * since character checking has been done earlier already. */
-				che = find_vfont_char(vfd, cha);
-
-				twidth = char_width(cu, che, info);
+				che = find_vfont_char(vfd, glyph_info[i].index);
+				twidth = char_width(cu, info, glyph_info[i].x_advance * vfd->scale);
 				ulwidth = (twidth * (1.0f + (info->kern / 40.0f))) + uloverlap;
 
 				rect.xmin = ct->xof;
@@ -1239,6 +1287,8 @@ finally:
 			MEM_freeN(chartransdata);
 		}
 	}
+
+	MEM_freeN(glyph_info);
 
 	return ok;
 

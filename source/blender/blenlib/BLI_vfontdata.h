@@ -35,7 +35,7 @@
  */
 
 #include "DNA_listBase.h"
-
+#include <raqm.h>
 struct PackedFile;
 struct VFont;
 
@@ -45,6 +45,16 @@ typedef struct VFontData {
 	float scale;
 } VFontData;
 
+typedef struct VGlyph {
+	int index;
+	int cluster;
+	int x_advance;
+	int x_offset;
+	int y_offset;
+	int glen;
+	struct VFont *vfont;
+} VGlyph;
+
 typedef struct VChar {
 	ListBase nurbsbase;
 	unsigned int index;
@@ -53,7 +63,9 @@ typedef struct VChar {
 
 VFontData *BLI_vfontdata_from_freetypefont(struct PackedFile *pf);
 
-VChar *BLI_vfontchar_from_freetypefont(struct VFont *vfont, unsigned long character);
+VChar *BLI_vfontchar_from_freetypefont(struct VFont *vfont, unsigned int character);
+
+VGlyph *BLI_shape_text(struct VFont **vfonts, unsigned int *text, int len);
 
 #endif
 

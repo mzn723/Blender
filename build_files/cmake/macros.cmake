@@ -239,7 +239,7 @@ endfunction()
 
 function(SETUP_LIBDIRS)
 
-	link_directories(${JPEG_LIBPATH} ${PNG_LIBPATH} ${ZLIB_LIBPATH} ${FREETYPE_LIBPATH})
+	link_directories(${JPEG_LIBPATH} ${PNG_LIBPATH} ${ZLIB_LIBPATH} ${FREETYPE_LIBPATH} ${RAQM_LIBRARY_DIRS})
 
 	if(WITH_PYTHON)  #  AND NOT WITH_PYTHON_MODULE  # WIN32 needs
 		link_directories(${PYTHON_LIBPATH})
@@ -318,6 +318,7 @@ function(setup_liblinks
 		${PNG_LIBRARIES}
 		${ZLIB_LIBRARIES}
 		${FREETYPE_LIBRARY}
+		${RAQM_LIBRARIES}
 	)
 
 	# since we are using the local libs for python when compiling msvc projects, we need to add _d when compiling debug versions

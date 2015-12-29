@@ -58,6 +58,7 @@ set(INC
 set(INC_SYS
 	${GLEW_INCLUDE_PATH}
 	${ZLIB_INCLUDE_DIRS}
+        ${RAQM_INCLUDE_DIRS}
 )
 
 set(SRC

@@ -57,7 +57,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/build_files/cmake/Modules")
 
 # avoid having empty buildtype
-set(CMAKE_BUILD_TYPE_INIT "Release")
+set(CMAKE_BUILD_TYPE_INIT "Debug")
 
 # quiet output for Makefiles, 'make -s' helps too
 # set_property(GLOBAL PROPERTY RULE_MESSAGES OFF)
@@ -879,6 +879,7 @@ if(UNIX AND NOT APPLE)
 	find_package_wrapper(PNG REQUIRED)
 	find_package_wrapper(ZLIB REQUIRED)
 	find_package_wrapper(Freetype REQUIRED)
+	pkg_check_modules(RAQM REQUIRED raqm)
 
 	if(WITH_LZO AND WITH_SYSTEM_LZO)
 		find_package_wrapper(LZO)

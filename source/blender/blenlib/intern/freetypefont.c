@@ -58,7 +58,7 @@ static FT_Library library;
 static FT_Error err;
 
 
-static VChar *freetypechar_to_vchar(FT_Face face, FT_ULong charcode, VFontData *vfd)
+static VChar *freetypechar_to_vchar(FT_Face face, unsigned int charcode, VFontData *vfd)
 {
 	const float scale = vfd->scale;
 	const float eps = 0.0001f;
@@ -70,7 +70,6 @@ static VChar *freetypechar_to_vchar(FT_Face face, FT_ULong charcode, VFontData *
 
 	/* Freetype2 */
 	FT_GlyphSlot glyph;
-	FT_UInt glyph_index;
 	FT_Outline ftoutline;
 	float dx, dy;
 	int j, k, l, l_first = 0;
@@ -79,8 +78,7 @@ static VChar *freetypechar_to_vchar(FT_Face face, FT_ULong charcode, VFontData *
 	 * Generate the character 3D data
 	 *
 	 * Get the FT Glyph index and load the Glyph */
-	glyph_index = FT_Get_Char_Index(face, charcode);
-	err = FT_Load_Glyph(face, glyph_index, FT_LOAD_NO_SCALE | FT_LOAD_NO_BITMAP);
+	err = FT_Load_Glyph(face, charcode, FT_LOAD_NO_SCALE | FT_LOAD_NO_BITMAP);
 
 	/* If loading succeeded, convert the FT glyph to the internal format */
 	if (!err) {
@@ -99,7 +97,7 @@ static VChar *freetypechar_to_vchar(FT_Face face, FT_ULong charcode, VFontData *
 		che->index = charcode;
 		che->width = glyph->advance.x * scale;
 
-		BLI_ghash_insert(vfd->characters, SET_UINT_IN_POINTER(che->index), che);
+		BLI_ghash_insert(vfd->characters, SET_UINT_IN_POINTER(charcode), che);
 
 		/* Start converting the FT data */
 		onpoints = (int *)MEM_callocN((ftoutline.n_contours) * sizeof(int), "onpoints");
@@ -250,7 +248,7 @@ static VChar *freetypechar_to_vchar(FT_Face face, FT_ULong charcode, VFontData *
 	return NULL;
 }
 
-static VChar *objchr_to_ftvfontdata(VFont *vfont, FT_ULong charcode)
+static VChar *objchr_to_ftvfontdata(VFont *vfont, unsigned int charcode)
 {
 	VChar *che;
 
@@ -373,7 +371,7 @@ static VFontData *objfnt_to_ftvfontdata(PackedFile *pf)
 
 	while (charcode < charcode_reserve) {
 		/* Generate the font data */
-		freetypechar_to_vchar(face, charcode, vfd);
+		freetypechar_to_vchar(face, glyph_index, vfd);
 
 		/* Next glyph */
 		charcode = FT_Get_Next_Char(face, charcode, &glyph_index);
@@ -481,7 +479,7 @@ VFontData *BLI_vfontdata_from_freetypefont(PackedFile *pf)
 	return vfd;
 }
 
-VChar *BLI_vfontchar_from_freetypefont(VFont *vfont, unsigned long character)
+VChar *BLI_vfontchar_from_freetypefont(VFont *vfont, unsigned int character)
 {
 	VChar *che = NULL;
 
@@ -502,6 +500,92 @@ VChar *BLI_vfontchar_from_freetypefont(VFont *vfont, unsigned long character)
 
 	return che;
 }
+
+VGlyph *BLI_shape_text(struct VFont **vfonts, unsigned int *text, int len)
+{
+	VFont *lastfont;
+	VGlyph *glyphs;
+
+	/* raqm */
+	raqm_t *rq;
+	raqm_glyph_t *raqm_glyphs;
+	size_t count, i, j;
+
+	/* init Freetype */
+	err = FT_Init_FreeType(&library);
+	if (err) {
+		printf("Failed to load the Freetype font library");
+		return NULL;
+	}
+
+	/* raqm stuff */
+	rq = raqm_create ();
+	raqm_set_text(rq, text, len);
+
+	/* setting faces */
+	lastfont = NULL;
+	for (i = 0; i < len; i++)
+	{
+		/* FreeType */
+		FT_Face face;
+
+		if (vfonts[i] != lastfont)
+		{
+			for (j = i; j < len && vfonts[j] == vfonts[i] ; j++)
+				;
+
+			/* Load the font from memory */
+			if (vfonts[i]->temp_pf) {
+				err = FT_New_Memory_Face(library,
+										 vfonts[i]->temp_pf->data,
+										 vfonts[i]->temp_pf->size,
+										 0,
+										 &face);
+				if (err) {
+					printf("Failed to load the Freetype font");
+					return NULL;
+				}
+			}
+			else {
+				return NULL;
+			}
+
+			/* Set font size */
+			err = FT_Set_Char_Size (face, face->units_per_EM, face->units_per_EM, 0, 0);
+			if (err) {
+				printf("Failed to set the size of Freetype font");
+				return NULL;
+			}
+
+			/* setting faces to raqm */
+			raqm_set_freetype_face_range(rq, face, i, j - i);
+			lastfont = vfonts[i];
+			i = j - 1;
+		}
+	}
+
+	/* shaping */
+	raqm_layout (rq);
+	raqm_glyphs = raqm_get_glyphs(rq, &count);
+
+	/* populating VGlyph */
+	glyphs = MEM_mallocN(((count) * sizeof(struct VGlyph)), "glyphs");
+	for (i = 0; i < count; i++) {
+		glyphs[i].cluster = raqm_glyphs[i].cluster;
+		glyphs[i].glen = count;
+		glyphs[i].index = raqm_glyphs[i].index;
+		glyphs[i].vfont = vfonts[raqm_glyphs[i].cluster];
+		glyphs[i].x_advance = raqm_glyphs[i].x_advance;
+		glyphs[i].x_offset = raqm_glyphs[i].x_offset;
+		glyphs[i].y_offset = raqm_glyphs[i].y_offset;
+	}
+
+	/* free Freetype */
+	FT_Done_FreeType(library);
+
+	return glyphs;
+}
+
 
 #if 0
 
